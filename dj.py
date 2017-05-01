@@ -5,9 +5,6 @@ import click
 from dj_reddit import DjReddit
 
 
-DJ = DjReddit(interactive=True)
-
-
 @click.group()
 def cli():
     pass
@@ -16,10 +13,11 @@ def cli():
 @cli.command()
 @click.argument('username')
 def get_spotify_token(username):
+    dj = DjReddit(interactive=True)
     token = environ.get('SPOTIPY_TOKEN')
 
     if not token:
-        token = DJ.generate_spotify_token(username)
+        token = dj.generate_spotify_token(username)
 
     print(token)
 

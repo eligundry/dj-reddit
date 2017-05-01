@@ -1,4 +1,5 @@
-from os import environ
+import os
+import re
 
 import praw
 import spotipy
@@ -28,10 +29,23 @@ class DjReddit(object):
 
     """
 
+    SPOTIFY_SCOPE = 'playlist-modify-public'
+    TITLE_REGEX = re.compile(
+        r'('
+        # Featuring will throw off Spotify searches
+        r'(featuring|feat|ft)\.?|'
+        # Don't care about some special chars
+        r'(&|-|,)'
+        r')',
+        re.IGNORECASE
+    )
+
     def __init__(self, interactive=False):
+        self.max_size = 100
         self.interactive = interactive
         self.reddit = self._create_reddit()
         self.spotify = self._create_spotify()
+        self.stations = {}
 
     def _create_reddit(self):
         """Create a Reddit object and authenticate it.
@@ -41,11 +55,11 @@ class DjReddit(object):
 
         """
         reddit = praw.Reddit(
-            client_id=environ['REDDIT_CLIENT_ID'],
-            client_secret=environ['REDDIT_CLIENT_SECRET'],
-            username=environ['REDDIT_USERNAME'],
-            password=environ['REDDIT_PASSWORD'],
-            user_agent=environ.get('REDDIT_USER_AGENT', 'DJ Reddit')
+            client_id=os.environ['REDDIT_CLIENT_ID'],
+            client_secret=os.environ['REDDIT_CLIENT_SECRET'],
+            username=os.environ['REDDIT_USERNAME'],
+            password=os.environ['REDDIT_PASSWORD'],
+            user_agent=os.environ.get('REDDIT_USER_AGENT', 'DJ Reddit')
         )
 
         # This app should never need to write to Reddit
@@ -53,7 +67,7 @@ class DjReddit(object):
 
         return reddit
 
-    def _create_spotify(self, token=environ.get('SPOTIPY_TOKEN')):
+    def _create_spotify(self, token=os.environ.get('SPOTIPY_TOKEN')):
         """Create a Spotify object and authenticate it.
 
         Returns:
@@ -61,9 +75,16 @@ class DjReddit(object):
 
         """
         if not token:
-            token = self.generate_spotify_token(environ['SPOTIPY_USERNAME'])
+            token = self.generate_spotify_token(os.environ['SPOTIPY_USERNAME'])
 
         return spotipy.Spotify(auth=token)
+
+    def _reauth_spotify(self):
+        self.spotify._auth = prompt_for_user_token(
+            os.environ['SPOTIPY_USERNAME'],
+            self.SPOTIFY_SCOPE
+        )
+        os.environ['SPOTIPY_TOKEN'] = self.spotify._auth
 
     # @TODO Spin up a small web app to get the token from the redirect
     # automatically?
@@ -91,4 +112,94 @@ class DjReddit(object):
                 "generate_spotify_token command from your local shell."
             )
 
-        return prompt_for_user_token(username, 'playlist-modify-public')
+        return prompt_for_user_token(username, self.SPOTIFY_SCOPE)
+
+    def add_station(self, subreddit, playlist_id):
+        self.stations[subreddit] = playlist_id
+        self.refresh_station(subreddit)
+
+    def refresh_stations(self):
+        for subreddit in self.stations:
+            self.refresh_station(subreddit)
+
+    def refresh_station(self, subreddit):
+        spotify_uris = []
+        playlist_id = self.stations[subreddit]
+        sub_model = self.reddit.subreddits.search_by_name(subreddit)[0]
+        posts = sub_model.hot()
+
+        # @TODO How do I paginate?
+        # while len(spotify_uris) != self.max_size:
+        for post in posts:
+            media = post.media
+
+            if not media:
+                continue
+
+            # We have a Spotify track link, no need to search
+            if 'spotify' in media['type'] and 'track' in post.url:
+                spotify_uris.append(post.url)
+                continue
+
+            track_id = self._get_spotify_id_from_title(
+                media['oembed']['title']
+            )
+
+            if track_id:
+                spotify_uris.append(track_id)
+
+        # Mass add all the tracks to the playlist after it has been cleared.
+        self._clear_spotify_playlist(playlist_id)
+        self._add_tracks_to_spotify_playlist(playlist_id, spotify_uris)
+
+    def _add_tracks_to_spotify_playlist(self, playlist_id, uris):
+        try:
+            self.spotify.user_playlist_add_tracks(
+                os.environ['SPOTIPY_USERNAME'],
+                playlist_id,
+                uris,
+            )
+        except spotipy.SpotifyException:
+            self._reauth_spotify()
+            self._add_tracks_to_spotify_playlist(playlist_id, uris)
+
+    def _clear_spotify_playlist(self, playlist_id):
+        try:
+            tracks = self.spotify.user_playlist(
+                os.environ['SPOTIPY_USERNAME'],
+                playlist_id,
+                fields='tracks.items(track(id))'
+            )
+            track_ids = [t['track']['id'] for t in tracks['tracks']['items']]
+            self.spotify.user_playlist_remove_all_occurrences_of_tracks(
+                os.environ['SPOTIPY_USERNAME'],
+                playlist_id,
+                track_ids
+            )
+        except spotipy.SpotifyException:
+            self._reauth_spotify()
+            self._clear_spotify_playlist(playlist_id)
+
+    # @TODO Overhaul this with some basic AI.
+    # https://textblob.readthedocs.io/
+    # https://github.com/seatgeek/fuzzywuzzy
+    # I should be able to join the ngrams of the title, loop through the track
+    # names, and then use fuzzywuzzy to find the most similar title.
+    def _get_spotify_id_from_title(self, title):
+        title = self._clean_up_title(title)
+
+        try:
+            res = self.spotify.search(q=title, type='track')
+        except spotipy.SpotifyException:
+            self._reauth_spotify()
+            return self._get_spotify_id_from_title(title)
+
+        if not res['tracks']['total']:
+            return False
+
+        return res['tracks']['items'][0]['id']
+
+    @classmethod
+    def _clean_up_title(cls, title):
+        title = re.sub(cls.TITLE_REGEX, ' ', title)
+        return ' '.join(title.split())
