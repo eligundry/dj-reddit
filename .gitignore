@@ -105,3 +105,4 @@ ENV/
 # App ignore
 .env
 .env.sh
+.cache-*

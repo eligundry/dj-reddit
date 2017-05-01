@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 
@@ -40,7 +41,8 @@ class DjReddit(object):
         re.IGNORECASE
     )
 
-    def __init__(self, interactive=False):
+    def __init__(self, interactive=False, debug=False):
+        self._init_logging(level=logging.DEBUG if debug else logging.WARNING)
         self.max_size = 100
         self.interactive = interactive
         self.reddit = self._create_reddit()
@@ -54,6 +56,8 @@ class DjReddit(object):
             praw.Reddit: An authenticated Reddit object.
 
         """
+        self.logger.debug("Authenticating with Reddit...")
+
         reddit = praw.Reddit(
             client_id=os.environ['REDDIT_CLIENT_ID'],
             client_secret=os.environ['REDDIT_CLIENT_SECRET'],
@@ -64,6 +68,8 @@ class DjReddit(object):
 
         # This app should never need to write to Reddit
         reddit.read_only = True
+
+        self.logger.debug("Successfully authenticated with Reddit.")
 
         return reddit
 
@@ -114,9 +120,11 @@ class DjReddit(object):
 
         return prompt_for_user_token(username, self.SPOTIFY_SCOPE)
 
-    def add_station(self, subreddit, playlist_id):
+    def add_station(self, subreddit, playlist_id, populate=True):
         self.stations[subreddit] = playlist_id
-        self.refresh_station(subreddit)
+
+        if populate:
+            self.refresh_station(subreddit)
 
     def refresh_stations(self):
         for subreddit in self.stations:
@@ -195,11 +203,26 @@ class DjReddit(object):
             return self._get_spotify_id_from_title(title)
 
         if not res['tracks']['total']:
+            self.logger.debug("Couldn't find track for '{}'".format(title))
             return False
 
-        return res['tracks']['items'][0]['id']
+        track_id = res['tracks']['items'][0]['id']
+
+        self.logger.debug('Found track {} for "{}"'.format(track_id, title))
+
+        return track_id
 
     @classmethod
     def _clean_up_title(cls, title):
         title = re.sub(cls.TITLE_REGEX, ' ', title)
         return ' '.join(title.split())
+
+    def _init_logging(self, level=logging.WARNING):
+        # Create a custom logger for this app
+        self.logger = logging.getLogger('dj_reddit')
+        self.logger.setLevel(level)
+
+        # Log to the console by default
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+        self.logger.addHandler(console_handler)
